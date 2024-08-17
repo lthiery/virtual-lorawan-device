@@ -10,6 +10,7 @@ use std::{
 };
 use structopt::StructOpt;
 use tokio::{
+    signal,
     sync::mpsc,
     time::{sleep, Duration},
 };
@@ -35,6 +36,18 @@ pub struct Opt {
 
 const DEFAULT_PF: &str = "default";
 
+fn setup_shutdown_listener() -> Result<triggered::Listener> {
+    let (trigger, listener) = triggered::trigger();
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigterm.recv() => trigger.trigger(),
+            _ = tokio::signal::ctrl_c() => trigger.trigger(),
+        }
+    });
+    Ok(listener)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Default log level to INFO unless environment override
@@ -54,18 +67,15 @@ async fn main() -> Result<()> {
     let instant = Instant::now();
     let settings = settings::Settings::new(&cli.settings)?;
     let metrics_server: IpAddr = settings.metrics_server.parse()?;
-    let metrics = Metrics::run(
-        (metrics_server, settings.metrics_port).into(),
-        settings.get_servers(),
-    );
+    let metrics = Metrics::new(settings.get_servers());
     let device_limit = if let Some(limit) = cli.limit {
         limit
     } else {
         usize::MAX
     };
-    let (trigger, trigger_listener) = triggered::trigger();
+    let trigger_listener = setup_shutdown_listener()?;
     let mut pf_map = setup_packet_forwarders(settings.packet_forwarder).await?;
-    for (label, device) in settings.device.into_iter().take(device_limit) {
+    for (label, device) in settings.device.clone().into_iter().take(device_limit) {
         let packet_forwarder = if let Some(pf) = &device.packet_forwarder {
             pf
         } else {
@@ -104,17 +114,22 @@ async fn main() -> Result<()> {
             panic!("Unknown macaddress linked to device!");
         }
     }
-
     for (_label, (udp_runtime, _client_tx, client_rx, senders)) in pf_map {
-        let shutdown_trigger = trigger_listener.clone();
-        tokio::spawn(udp_runtime.run(shutdown_trigger));
-        let shutdown_trigger = trigger_listener.clone();
-        tokio::spawn(packet_muxer(instant, client_rx, senders, shutdown_trigger));
+        tokio::spawn(udp_runtime.run(trigger_listener.clone()));
+        tokio::spawn(packet_muxer(
+            instant,
+            client_rx,
+            senders,
+            trigger_listener.clone(),
+        ));
     }
 
-    tokio::signal::ctrl_c().await?;
-    trigger.trigger();
-    info!("User exit via ctrl C");
+    metrics
+        .run(
+            trigger_listener,
+            (metrics_server, settings.metrics_port).into(),
+        )
+        .await?;
     Ok(())
 }
 

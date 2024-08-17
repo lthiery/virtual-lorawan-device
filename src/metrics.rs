@@ -1,14 +1,16 @@
 use super::*;
-use error::{Error, Result};
-use hyper::{
-    header::CONTENT_TYPE,
-    service::{make_service_fn, service_fn},
-    Body, Request, Response, Server,
-};
-use log::{debug, warn};
+use crate::error::Result;
+use bytes::Bytes;
+use error::Error;
+use http_body_util::Full;
+use hyper::{server::conn::http1, service::service_fn, Request, Response};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use log::debug;
 use prometheus::{register_counter_vec, register_histogram_vec};
-use prometheus::{CounterVec, HistogramVec};
+use prometheus::{CounterVec, HistogramVec, Opts};
 use prometheus::{Encoder, TextEncoder};
+use std::convert::Infallible;
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 pub struct Sender {
@@ -47,6 +49,8 @@ pub enum Message {
 
 pub struct Metrics {
     sender: mpsc::Sender<InternalMessage>,
+    rx: mpsc::Receiver<InternalMessage>,
+    internal_metrics: InternalMetrics,
 }
 
 #[derive(Debug)]
@@ -67,26 +71,12 @@ struct InternalMetrics {
 }
 
 impl Metrics {
-    pub fn run(addr: std::net::SocketAddr, servers: Vec<&String>) -> Metrics {
-        // Start Prom Metrics Endpoint
-        info!("Prometheus Server listening on http://{}", addr);
-        let serve_future = Server::bind(&addr).serve(make_service_fn(|_| async {
-            Ok::<_, hyper::Error>(service_fn(Metrics::serve_req))
-        }));
-
-        tokio::spawn(async move {
-            if let Err(e) = serve_future.await {
-                error!("prometheus serv threw error: {:?}", e)
-            }
-        });
-
-        let (sender, mut rx) = mpsc::channel(1024);
-
+    pub fn new(servers: Vec<&String>) -> Metrics {
+        let (sender, rx) = mpsc::channel(1024);
         let metrics = InternalMetrics {
-            join_success_counter: register_counter_vec!(
-                "join_success",
-                "join success counter",
-                &["server"]
+            join_success_counter: CounterVec::new(
+                Opts::new("join_success", "join success counter"),
+                &["server"],
             )
             .unwrap(),
             join_fail_counter: register_counter_vec!("join_fail", "join fail counter", &["server"])
@@ -94,7 +84,7 @@ impl Metrics {
             data_success_counter: register_counter_vec!(
                 "data_success",
                 "data success counter",
-                &["server"]
+                &["server"],
             )
             .unwrap(),
             data_fail_counter: register_counter_vec!("data_fail", "data fail counter", &["server"])
@@ -103,7 +93,7 @@ impl Metrics {
                 "join_latency",
                 "join latency histogram",
                 &["server"],
-                vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+                vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5],
             )
             .unwrap(),
             data_latency: register_histogram_vec!(
@@ -134,44 +124,47 @@ impl Metrics {
                 .with_label_values(&[server])
                 .reset();
         }
+        Metrics {
+            sender,
+            rx,
+            internal_metrics: metrics,
+        }
+    }
+    pub async fn run(mut self, shutdown: triggered::Listener, addr: SocketAddr) -> Result {
+        // Start Prom Metrics Endpoint
+        info!("Prometheus Server listening on http://{}", addr);
 
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Some(InternalMessage::JoinSuccess(label, t)) => {
-                        let in_secs = (t as f64) / 1000000.0;
-                        metrics
-                            .join_latency
-                            .with_label_values(&[&label])
-                            .observe(in_secs);
-                        metrics
-                            .join_success_counter
-                            .with_label_values(&[&label])
-                            .inc();
-                    }
-                    Some(InternalMessage::JoinFail(label)) => {
-                        metrics.join_fail_counter.with_label_values(&[&label]).inc()
-                    }
-
-                    Some(InternalMessage::DataSuccess(label, t)) => {
-                        let in_secs = (t as f64) / 1000000.0;
-                        metrics
-                            .data_latency
-                            .with_label_values(&[&label])
-                            .observe(in_secs);
-                        metrics
-                            .data_success_counter
-                            .with_label_values(&[&label])
-                            .inc();
-                    }
-                    Some(InternalMessage::DataFail(label)) => {
-                        metrics.data_fail_counter.with_label_values(&[&label]).inc()
-                    }
-                    None => warn!("Metrics receive channel returned None. Is closed?"),
+        // Bind to the port and listen for incoming TCP connections
+        let listener = TcpListener::bind(addr).await?;
+        loop {
+            tokio::select!(
+                _ = shutdown.clone() => {
+                    return Ok(())
                 }
-            }
-        });
-        Metrics { sender }
+                result = listener.accept() => {
+                    match result {
+                        Ok((tcp, addr)) => {
+                            info!("Receiving connection from {addr:?}");
+                             let io = TokioIo::new(tcp);
+                            if let Err(e) = http1::Builder::new()
+                                .timer(TokioTimer::new())
+                                .serve_connection(io, service_fn(Self::serve_req))
+                            .await {
+                                error!("Error serving connection: {:?}", e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error accepting connection: {:?}", e);
+                        }
+                    }
+                }
+                msg = self.rx.recv() => {
+                    if let Some(msg) = msg {
+                        self.handle_msg(msg).await;
+                    }
+                }
+            );
+        }
     }
 
     pub fn get_server_sender(&self, server: &str) -> Sender {
@@ -181,7 +174,9 @@ impl Metrics {
         }
     }
 
-    pub async fn serve_req(_req: Request<Body>) -> Result<Response<Body>> {
+    pub async fn serve_req(
+        _: Request<impl hyper::body::Body>,
+    ) -> std::result::Result<Response<Full<Bytes>>, Infallible> {
         let encoder = TextEncoder::new();
 
         let metric_families = prometheus::gather();
@@ -192,13 +187,44 @@ impl Metrics {
 
         // Output current stats
         debug!("{}", String::from_utf8(buffer_print).unwrap());
+        Ok(Response::new(Full::new(Bytes::from(buffer))))
+    }
 
-        let response = Response::builder()
-            .status(200)
-            .header(CONTENT_TYPE, encoder.format_type())
-            .body(Body::from(buffer))
-            .unwrap();
+    async fn handle_msg(&mut self, msg: InternalMessage) {
+        match msg {
+            InternalMessage::JoinSuccess(label, t) => {
+                let in_secs = (t as f64) / 1000000.0;
+                self.internal_metrics
+                    .join_latency
+                    .with_label_values(&[&label])
+                    .observe(in_secs);
+                self.internal_metrics
+                    .join_success_counter
+                    .with_label_values(&[&label])
+                    .inc();
+            }
+            InternalMessage::JoinFail(label) => self
+                .internal_metrics
+                .join_fail_counter
+                .with_label_values(&[&label])
+                .inc(),
 
-        Ok(response)
+            InternalMessage::DataSuccess(label, t) => {
+                let in_secs = (t as f64) / 1000000.0;
+                self.internal_metrics
+                    .data_latency
+                    .with_label_values(&[&label])
+                    .observe(in_secs);
+                self.internal_metrics
+                    .data_success_counter
+                    .with_label_values(&[&label])
+                    .inc();
+            }
+            InternalMessage::DataFail(label) => self
+                .internal_metrics
+                .data_fail_counter
+                .with_label_values(&[&label])
+                .inc(),
+        }
     }
 }

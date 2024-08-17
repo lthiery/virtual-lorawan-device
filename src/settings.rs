@@ -17,15 +17,18 @@ impl Settings {
     /// file in the given path, followed by merging in an optional settings.toml
     /// in the same folder.
     pub fn new(path: &Path) -> Result<Settings> {
-        let mut c = Config::new();
-        let default_file = path.join("default.toml");
-        // Load default config and merge in overrides
-        c.merge(File::with_name(default_file.to_str().expect("file name")))?;
+        let mut builder = Config::builder()
+            .add_source(File::new("settings/default.toml", config::FileFormat::Toml));
+
         let settings_file = path.join("settings.toml");
         if settings_file.exists() {
-            c.merge(File::with_name(settings_file.to_str().expect("file name")))?;
+            builder = builder.add_source(File::new(
+                settings_file.to_str().expect("file name"),
+                config::FileFormat::Toml,
+            ));
         }
-        c.try_into().map_err(|e| e.into())
+        let config = builder.build()?;
+        Ok(config.try_deserialize()?)
     }
 
     pub fn get_servers(&self) -> Vec<&String> {

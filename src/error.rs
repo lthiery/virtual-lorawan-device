@@ -25,4 +25,6 @@ pub enum Error {
     SendingDownlinkToUdpRadio(mpsc::error::SendError<virtual_device::IntermediateEvent>),
     #[error("receive channel from semtech_udp::client_runtime unexpectedly closed")]
     RxChannelSemtechUdpClientRuntimeClosed,
+    #[error("tokio join error: {0}")]
+    TokioJoin(tokio::task::JoinError),
 }

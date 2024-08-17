@@ -1,5 +1,5 @@
 use log::info;
-use lorawan_device::{radio, Timings};
+use lorawan_device::{nb_device::radio, Timings};
 use semtech_udp::client_runtime::{ClientTx, DownlinkRequest};
 use semtech_udp::{Bandwidth, CodingRate, DataRate, SpreadingFactor};
 use std::time::{Duration, Instant};
@@ -84,12 +84,15 @@ impl UdpRadio {
     }
 }
 
-use lorawan_device::radio::{Event as LoraEvent, Response as LoraResponse, RxQuality};
+use lorawan_device::nb_device::radio::{Event as LoraEvent, Response as LoraResponse, RxQuality};
 
 impl radio::PhyRxTx for UdpRadio {
-    type PhyError = Error;
-    type PhyResponse = Response;
     type PhyEvent = Box<DownlinkRequest>;
+    type PhyError = Error;
+
+    type PhyResponse = Response;
+    const ANTENNA_GAIN: i8 = 3;
+    const MAX_RADIO_POWER: u8 = 20;
 
     fn get_mut_radio(&mut self) -> &mut Self {
         self
@@ -99,10 +102,7 @@ impl radio::PhyRxTx for UdpRadio {
         &mut self.rx_buffer[0..self.pos]
     }
 
-    fn handle_event(
-        &mut self,
-        event: LoraEvent<Self>,
-    ) -> Result<LoraResponse<Self>, radio::Error<Error>> {
+    fn handle_event(&mut self, event: LoraEvent<Self>) -> Result<LoraResponse<Self>, Error> {
         use semtech_udp::push_data::*;
         match event {
             radio::Event::TxRequest(tx_config, buffer) => {
@@ -149,7 +149,7 @@ impl radio::PhyRxTx for UdpRadio {
                 Ok(radio::Response::Idle)
             }
             radio::Event::CancelRx => Ok(radio::Response::Idle),
-            radio::Event::PhyEvent(packet) => {
+            radio::Event::Phy(packet) => {
                 let data = packet.pull_resp.data.txpk.data.as_ref();
                 self.pos = data.len();
                 for (i, el) in data.iter().enumerate() {
@@ -183,9 +183,12 @@ impl Default for Settings {
         Settings {
             rfconfig: radio::RfConfig {
                 frequency: 903000000,
-                bandwidth: radio::Bandwidth::_125KHz,
-                spreading_factor: radio::SpreadingFactor::_7,
-                coding_rate: radio::CodingRate::_4_5,
+
+                bb: radio::BaseBandModulationParams::new(
+                    radio::SpreadingFactor::_7,
+                    radio::Bandwidth::_125KHz,
+                    radio::CodingRate::_4_5,
+                ),
             },
         }
     }
@@ -202,7 +205,9 @@ impl From<radio::TxConfig> for Settings {
 impl Settings {
     fn get_datr(&self) -> DataRate {
         DataRate::new(
-            match self.rfconfig.spreading_factor {
+            match self.rfconfig.bb.sf {
+                radio::SpreadingFactor::_5 => SpreadingFactor::SF5,
+                radio::SpreadingFactor::_6 => SpreadingFactor::SF6,
                 radio::SpreadingFactor::_7 => SpreadingFactor::SF7,
                 radio::SpreadingFactor::_8 => SpreadingFactor::SF8,
                 radio::SpreadingFactor::_9 => SpreadingFactor::SF9,
@@ -210,16 +215,17 @@ impl Settings {
                 radio::SpreadingFactor::_11 => SpreadingFactor::SF11,
                 radio::SpreadingFactor::_12 => SpreadingFactor::SF12,
             },
-            match self.rfconfig.bandwidth {
+            match self.rfconfig.bb.bw {
                 radio::Bandwidth::_125KHz => Bandwidth::BW125,
                 radio::Bandwidth::_250KHz => Bandwidth::BW250,
                 radio::Bandwidth::_500KHz => Bandwidth::BW500,
+                _ => panic!("unexpected lorawan bandwidth"),
             },
         )
     }
 
     fn get_codr(&self) -> CodingRate {
-        match self.rfconfig.coding_rate {
+        match self.rfconfig.bb.cr {
             radio::CodingRate::_4_5 => CodingRate::_4_5,
             radio::CodingRate::_4_6 => CodingRate::_4_6,
             radio::CodingRate::_4_7 => CodingRate::_4_7,

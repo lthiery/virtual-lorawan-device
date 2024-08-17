@@ -1,11 +1,17 @@
 use super::*;
 
-use lorawan::default_crypto::DefaultFactory as LorawanCrypto;
+use lorawan_device::default_crypto::DefaultFactory as LorawanCrypto;
+use lorawan_device::mac::NetworkCredentials;
 use lorawan_device::region::Configuration;
-use lorawan_device::{radio, Device, Event as LorawanEvent, JoinMode, Response as LorawanResponse};
+use lorawan_device::{
+    nb_device::{radio, Device, Event as LorawanEvent, Response as LorawanResponse},
+    AppEui, AppKey, DevEui,
+};
 use semtech_udp::client_runtime::DownlinkRequest;
+use std::str::FromStr;
 use tokio::time::{sleep, Duration};
 use udp_radio::UdpRadio;
+
 pub(crate) use udp_radio::{mpsc, IntermediateEvent};
 mod udp_radio;
 
@@ -18,6 +24,7 @@ pub struct VirtualDevice {
     rejoin_frames: u32,
     secs_between_transmits: u64,
     secs_between_join_transmits: u64,
+    credentials: NetworkCredentials,
 }
 
 #[derive(Clone)]
@@ -60,16 +67,8 @@ impl VirtualDevice {
             settings::Region::US915 => lorawan_device::Region::US915,
         };
 
-        let device: Device<UdpRadio, LorawanCrypto, rand::rngs::OsRng, 512> = Device::new(
-            Configuration::new(region),
-            JoinMode::OTAA {
-                deveui: credentials.deveui_cloned_into_buf()?,
-                appeui: credentials.appeui_cloned_into_buf()?,
-                appkey: credentials.appkey_cloned_into_buf()?,
-            },
-            radio,
-            rand::rngs::OsRng,
-        );
+        let device: Device<UdpRadio, LorawanCrypto, rand::rngs::OsRng, 512> =
+            Device::new(Configuration::new(region), radio, rand::rngs::OsRng);
 
         Ok((
             PacketSender {
@@ -84,6 +83,11 @@ impl VirtualDevice {
                 rejoin_frames,
                 secs_between_transmits,
                 secs_between_join_transmits,
+                credentials: NetworkCredentials::new(
+                    AppEui::from_str(&credentials.app_eui)?,
+                    DevEui::from_str(&credentials.dev_eui)?,
+                    AppKey::from_str(&credentials.app_key)?,
+                ),
             },
         ))
     }
@@ -111,7 +115,7 @@ impl VirtualDevice {
             let response = {
                 match event {
                     IntermediateEvent::NewSession => {
-                        lorawan.handle_event(LorawanEvent::NewSessionRequest)
+                        lorawan.handle_event(LorawanEvent::Join(self.credentials.clone()))
                     }
                     IntermediateEvent::Timeout(id) => {
                         if lorawan.get_radio().most_recent_timeout(id) {
@@ -131,8 +135,16 @@ impl VirtualDevice {
                         lorawan.send(&data, fport, confirmed)
                     }
                     // at this level, the RadioEvent is being delivered in the appropriate window
-                    IntermediateEvent::RadioEvent(frame, _time_received) => lorawan
-                        .handle_event(LorawanEvent::RadioEvent(radio::Event::PhyEvent(frame))),
+                    IntermediateEvent::RadioEvent(frame, time_received) => {
+                        time_remaining = frame
+                            .pull_resp
+                            .data
+                            .txpk
+                            .time
+                            .tmst()
+                            .map(|tmst| tmst as i64 - time_received as i64);
+                        lorawan.handle_event(LorawanEvent::RadioEvent(radio::Event::Phy(frame)))
+                    }
                 }
             };
             let (send_uplink, confirmed) = {
@@ -145,6 +157,9 @@ impl VirtualDevice {
                         }
                         LorawanResponse::JoinSuccess => {
                             send_uplink = true;
+                            metrics_sender
+                                .send(metrics::Message::JoinSuccess(0))
+                                .await?;
                             if let Some(time_remaining) = time_remaining.take() {
                                 metrics_sender
                                     .send(metrics::Message::JoinSuccess(time_remaining))
@@ -164,6 +179,7 @@ impl VirtualDevice {
                             send_uplink = true;
                             debug!("{:8} ready to send", self.label)
                         }
+                        LorawanResponse::RxComplete => (),
                         LorawanResponse::DownlinkReceived(fcnt_down) => {
                             send_uplink = true;
                             if let Some(time_remaining) = time_remaining.take() {
