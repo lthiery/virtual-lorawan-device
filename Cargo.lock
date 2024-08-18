@@ -1483,6 +1483,7 @@ dependencies = [
  "lorawan-device",
  "prometheus",
  "rand",
+ "rand_core",
  "semtech-udp",
  "serde",
  "structopt",

@@ -6,7 +6,7 @@ pub type Result<T = ()> = std::result::Result<T, Error>;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("udp_radio receive closed or overflowed")]
-    UdpRadioClosed(#[from] tokio::sync::mpsc::error::SendError<virtual_device::IntermediateEvent>),
+    UdpRadioClosed,
     #[error("unable to parse socket address")]
     AddrParse(#[from] std::net::AddrParseError),
     #[error("configuration file error")]
@@ -21,8 +21,8 @@ pub enum Error {
     SemtechUdpClientRuntime(#[from] semtech_udp::client_runtime::Error),
     #[error("invalid region string")]
     InvalidRegionString(String),
-    #[error("error sending downlink to upd_radio instance: {0}")]
-    SendingDownlinkToUdpRadio(mpsc::error::SendError<virtual_device::IntermediateEvent>),
+    #[error("error sending downlink to upd_radio instance")]
+    SendingDownlinkToUdpRadio,
     #[error("receive channel from semtech_udp::client_runtime unexpectedly closed")]
     RxChannelSemtechUdpClientRuntimeClosed,
     #[error("tokio join error: {0}")]
