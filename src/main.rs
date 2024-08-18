@@ -25,6 +25,8 @@ use async_virtual_device::VirtualDevice;
 
 #[cfg(not(feature = "async-radio"))]
 mod virtual_device;
+mod util;
+
 #[cfg(not(feature = "async-radio"))]
 use virtual_device::VirtualDevice;
 
@@ -191,6 +193,7 @@ async fn packet_muxer<S: DownlinkSender>(
                                 let sender = sender.clone();
                                 let downlink = downlink.clone();
                                 tokio::spawn(async move {
+                                    info!("Sending dowlink in {} μs", delay);
                                     sleep(Duration::from_micros(delay as u64 + 50_000)).await;
                                     if let Err(e) = sender.send(downlink, delay as u64).await {
                                         error!("Error sending packet to virtual-lorawan-device instance: {e}");

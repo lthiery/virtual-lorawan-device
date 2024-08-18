@@ -27,4 +27,7 @@ pub enum Error {
     RxChannelSemtechUdpClientRuntimeClosed,
     #[error("tokio join error: {0}")]
     TokioJoin(tokio::task::JoinError),
+    #[cfg(feature = "async-radio")]
+    #[error("async radio error")]
+    AsyncLorawanRadio(lorawan_device::async_device::Error<async_virtual_device::radio::Error>),
 }

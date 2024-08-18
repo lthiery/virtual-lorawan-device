@@ -1,91 +1,39 @@
+pub mod radio;
+
+use radio::*;
+
 use crate::{metrics, settings, Credentials, DownlinkSender, Result};
-use lorawan_device::async_device::radio::{RxConfig, RxQuality, RxStatus, TxConfig};
+
+use log::{debug, error, info, warn};
 use lorawan_device::async_device::{
-    radio::{PhyRxTx, Timer},
-    Device, NetworkCredentials, Timings,
+    radio::{PhyRxTx, Timer, RxConfig},
+    Device, JoinResponse, NetworkCredentials, SendResponse, Timings,
 };
 use lorawan_device::default_crypto::DefaultFactory;
 use lorawan_device::region::Configuration;
-use lorawan_device::{AppEui, AppKey, DevEui};
-use semtech_udp::client_runtime::{ClientTx, DownlinkRequest};
+use lorawan_device::{AppEui, AppKey, DevEui, JoinMode};
+pub use semtech_udp::client_runtime::{ClientTx, DownlinkRequest};
 use std::str::FromStr;
 use std::time::Instant;
-use tokio::time::{sleep, Duration};
+use tokio::{
+    sync::mpsc,
+    time::{sleep, Duration},
+};
 
 pub struct VirtualDevice {
     label: String,
     metrics_sender: metrics::Sender,
-    time: Instant,
-    client_tx: ClientTx,
     rejoin_frames: u32,
     secs_between_transmits: u64,
     secs_between_join_transmits: u64,
     credentials: NetworkCredentials,
     device: Device<VirtualRadio, DefaultFactory, VirtualTimer, rand_core::OsRng, 512, 4>,
+    state: State,
 }
 
-#[derive(Clone)]
-pub struct DS;
-
-impl DownlinkSender for DS {
-    async fn send(&self, _downlink: Box<DownlinkRequest>, _delayed_for: u64) -> Result {
-        todo!()
-    }
-}
-
-struct VirtualRadio;
-impl PhyRxTx for VirtualRadio {
-    type PhyError = ();
-    const ANTENNA_GAIN: i8 = 0;
-    const MAX_RADIO_POWER: u8 = 0;
-
-    async fn tx(
-        &mut self,
-        config: TxConfig,
-        buf: &[u8],
-    ) -> std::result::Result<u32, Self::PhyError> {
-        todo!()
-    }
-
-    async fn setup_rx(&mut self, config: RxConfig) -> std::result::Result<(), Self::PhyError> {
-        todo!()
-    }
-
-    async fn rx_continuous(
-        &mut self,
-        rx_buf: &mut [u8],
-    ) -> std::result::Result<(usize, RxQuality), Self::PhyError> {
-        todo!()
-    }
-
-    async fn rx_single(&mut self, buf: &mut [u8]) -> std::result::Result<RxStatus, Self::PhyError> {
-        todo!()
-    }
-}
-
-impl Timings for VirtualRadio {
-    fn get_rx_window_lead_time_ms(&self) -> u32 {
-        todo!()
-    }
-}
-
-struct VirtualTimer(Instant);
-
-impl Timer for VirtualTimer {
-    fn reset(&mut self) {
-        self.0 = Instant::now();
-    }
-
-    async fn at(&mut self, millis: u64) {
-        let delay = self.0.elapsed().as_millis() as u64 - millis;
-        if delay > 0 {
-            sleep(Duration::from_millis(delay)).await;
-        }
-    }
-
-    async fn delay_ms(&mut self, millis: u64) {
-        tokio::time::sleep(Duration::from_millis(millis)).await;
-    }
+enum State {
+    Joined,
+    NotJoined,
 }
 
 impl VirtualDevice {
@@ -101,14 +49,13 @@ impl VirtualDevice {
         secs_between_join_transmits: u64,
         region: settings::Region,
     ) -> Result<(DS, Self)> {
+        let (sender, receiver) = mpsc::channel(100);
         Ok((
-            DS {},
+            DS(sender),
             Self {
                 label,
                 metrics_sender,
                 rejoin_frames,
-                time,
-                client_tx,
                 secs_between_transmits,
                 secs_between_join_transmits,
                 credentials: NetworkCredentials::new(
@@ -118,15 +65,81 @@ impl VirtualDevice {
                 ),
                 device: Device::new(
                     Configuration::new(region.into()),
-                    VirtualRadio {},
+                    VirtualRadio {
+                        receiver,
+                        client_tx,
+                        time,
+                        rx_config: None,
+                    },
                     VirtualTimer(time),
                     rand_core::OsRng,
                 ),
+                state: State::NotJoined,
             },
         ))
     }
 
     pub async fn run(mut self) -> Result {
+        // stagger the starts slightly
+        let random = rand::random::<u64>() % 1000;
+        sleep(Duration::from_millis(random)).await;
+
+        loop {
+            match self.state {
+                State::NotJoined => self.do_join().await?,
+                State::Joined => self.do_send().await?,
+            }
+        }
+    }
+
+    async fn do_join(&mut self) -> Result {
+        let join_response = self
+            .device
+            .join(&JoinMode::OTAA {
+                deveui: self.credentials.deveui().clone(),
+                appeui: self.credentials.appeui().clone(),
+                appkey: self.credentials.appkey().clone(),
+            })
+            .await
+            .map_err(|e| crate::Error::AsyncLorawanRadio(e))?;
+
+        match join_response {
+            JoinResponse::JoinSuccess => {
+                self.state = State::Joined;
+                info!("{} joined successfully", self.label);
+            }
+            JoinResponse::NoJoinAccept => {
+                sleep(Duration::from_secs(self.secs_between_join_transmits)).await;
+                error!("{} failed to join", self.label);
+            }
+        }
+        Ok(())
+    }
+
+    async fn do_send(&mut self) -> Result {
+        let send_response = self
+            .device
+            .send(
+                &vec![
+                    rand::random(),
+                    rand::random(),
+                    rand::random(),
+                    rand::random(),
+                ],
+                5,
+                false,
+            )
+            .await
+            .map_err(|e| crate::Error::AsyncLorawanRadio(e))?;
+        match send_response {
+            SendResponse::SessionExpired => {}
+            SendResponse::NoAck => {}
+            SendResponse::DownlinkReceived(fcnt_down) => {
+                while let Some(_downlink) = self.device.take_downlink() {}
+            }
+            SendResponse::RxComplete => {}
+        }
+        sleep(Duration::from_secs(self.secs_between_transmits)).await;
         Ok(())
     }
 }
