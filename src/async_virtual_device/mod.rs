@@ -50,6 +50,18 @@ impl VirtualDevice {
         region: settings::Region,
     ) -> Result<(DS, Self)> {
         let (sender, receiver) = mpsc::channel(100);
+        let mut device = Device::new(
+            Configuration::new(region.into()),
+            VirtualRadio {
+                receiver,
+                client_tx,
+                time,
+                rx_config: None,
+            },
+            VirtualTimer(time),
+            rand_core::OsRng,
+        );
+        device.enable_class_c();
         Ok((
             DS(sender),
             Self {
@@ -63,17 +75,7 @@ impl VirtualDevice {
                     DevEui::from_str(&credentials.dev_eui)?,
                     AppKey::from_str(&credentials.app_key)?,
                 ),
-                device: Device::new(
-                    Configuration::new(region.into()),
-                    VirtualRadio {
-                        receiver,
-                        client_tx,
-                        time,
-                        rx_config: None,
-                    },
-                    VirtualTimer(time),
-                    rand_core::OsRng,
-                ),
+                device,
                 state: State::NotJoined,
             },
         ))
@@ -127,7 +129,7 @@ impl VirtualDevice {
                     rand::random(),
                 ],
                 5,
-                false,
+                true,
             )
             .await
             .map_err(|e| crate::Error::AsyncLorawanRadio(e))?;

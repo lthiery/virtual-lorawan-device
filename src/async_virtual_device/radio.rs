@@ -83,6 +83,7 @@ impl PhyRxTx for VirtualRadio {
     }
 
     async fn rx_single(&mut self, buf: &mut [u8]) -> Result<RxStatus, Self::PhyError> {
+        info!("Rx Single");
         if let Some(rx_config) = self.rx_config {
             if let RxMode::Single { ms } = rx_config.mode {
                 tokio::select!(
@@ -116,7 +117,10 @@ impl VirtualRadio  {
 
 impl Timings for VirtualRadio {
     fn get_rx_window_lead_time_ms(&self) -> u32 {
-        0
+        10
+    }
+    fn get_rx_window_buffer(&self) -> u32 {
+        20
     }
 }
 
