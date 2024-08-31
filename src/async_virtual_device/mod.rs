@@ -8,6 +8,7 @@ use log::{debug, error, info, warn};
 use lorawan_device::async_device::{
     radio::{PhyRxTx, Timer, RxConfig},
     Device, JoinResponse, NetworkCredentials, SendResponse, Timings,
+    Downlink,
 };
 use lorawan_device::default_crypto::DefaultFactory;
 use lorawan_device::region::Configuration;
@@ -86,15 +87,40 @@ impl VirtualDevice {
         let random = rand::random::<u64>() % 1000;
         sleep(Duration::from_millis(random)).await;
 
+
         loop {
-            match self.state {
-                State::NotJoined => self.do_join().await?,
-                State::Joined => self.do_send().await?,
-            }
+            let result = match self.state {
+                State::NotJoined => self.do_join().await,
+                State::Joined => self.do_send().await,
+            };
+            let duration = match result {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("{} error: {:?}", self.label, e);
+                    Duration::from_secs(0)
+                }
+            };
+
+            tokio::select!(
+                _ = sleep(duration) => {},
+                result = self.device.rxc_listen() => {
+                    match result {
+                        Ok(response) => {
+                            println!("response: {:?}", response);
+                        }
+                        Err(e) => {
+                            error!("{} error: {:?}", self.label, e);
+                        }
+                    }
+                    while let Some(downlink) = self.device.take_downlink() {
+                        self.handle_downlink(downlink, true);
+                    }
+                }
+            )
         }
     }
 
-    async fn do_join(&mut self) -> Result {
+    async fn do_join(&mut self) -> Result<Duration> {
         let join_response = self
             .device
             .join(&JoinMode::OTAA {
@@ -109,16 +135,17 @@ impl VirtualDevice {
             JoinResponse::JoinSuccess => {
                 self.state = State::Joined;
                 info!("{} joined successfully", self.label);
+                Ok(Duration::from_secs(0))
             }
             JoinResponse::NoJoinAccept => {
-                sleep(Duration::from_secs(self.secs_between_join_transmits)).await;
                 error!("{} failed to join", self.label);
+                Ok(Duration::from_secs(self.secs_between_join_transmits))
             }
         }
-        Ok(())
+
     }
 
-    async fn do_send(&mut self) -> Result {
+    async fn do_send(&mut self) -> Result<Duration> {
         let send_response = self
             .device
             .send(
@@ -136,12 +163,19 @@ impl VirtualDevice {
         match send_response {
             SendResponse::SessionExpired => {}
             SendResponse::NoAck => {}
-            SendResponse::DownlinkReceived(fcnt_down) => {
-                while let Some(_downlink) = self.device.take_downlink() {}
+            SendResponse::DownlinkReceived(fcnt) => {
+                while let Some(downlink) = self.device.take_downlink() {
+                    self.handle_downlink(downlink, false);
+                }
             }
             SendResponse::RxComplete => {}
         }
-        sleep(Duration::from_secs(self.secs_between_transmits)).await;
-        Ok(())
+        Ok(Duration::from_secs(self.secs_between_transmits))
+    }
+
+    fn handle_downlink(&mut self, downlink: Downlink, is_class_c: bool) {
+        let data_len = downlink.data.len();
+        let fport = downlink.fport;
+        info!("{} downlink received: len = {data_len}, fport = {fport}, class_c = {is_class_c}", self.label);
     }
 }

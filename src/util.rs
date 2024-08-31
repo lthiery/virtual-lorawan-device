@@ -1,5 +1,5 @@
 use lorawan_device::nb_device::radio;
-use semtech_udp::{Bandwidth, CodingRate, DataRate, SpreadingFactor, push_data};
+use semtech_udp::{CodingRate, DataRate, push_data};
 use semtech_udp::push_data::RxPkV1;
 
 pub(crate) fn tx_request_to_rxpk(settings: Settings, buffer: &[u8], tmst: u32) -> push_data::Packet {
@@ -8,7 +8,7 @@ pub(crate) fn tx_request_to_rxpk(settings: Settings, buffer: &[u8], tmst: u32) -
         chan: 0,
         data: Vec::from(buffer),
         size: buffer.len() as u64,
-        codr: settings.get_codr(),
+        codr: Some(settings.get_codr()),
         datr: settings.get_datr(),
         freq: settings.get_freq(),
         lsnr: 5.5,
@@ -20,7 +20,22 @@ pub(crate) fn tx_request_to_rxpk(settings: Settings, buffer: &[u8], tmst: u32) -
         tmst,
         time: None,
     };
-    Packet::from_rxpk([0, 0, 0, 0, 0, 0, 0, 0].into(), RxPk::V1(rxpk)).into()
+    let mut packet= Packet::from_rxpk([0, 0, 0, 0, 0, 0, 0, 0].into(), RxPk::V1(rxpk));
+
+    packet.data.stat = Some(push_data::Stat {
+        time: chrono::Utc::now().to_string(),
+        lati: None,//37.8507396,
+        long: None,//-122.2817759,
+        alti: None,
+        rxnb: 0,
+        rxok: 1,
+        rxfw: 0,
+        ackr: None,
+        dwnb: 0,
+        txnb: 0,
+        temp: None,
+    });
+    packet.into()
 }
 
 #[derive(Debug)]
@@ -54,22 +69,8 @@ impl From<radio::RfConfig> for Settings {
 impl Settings {
     pub fn get_datr(&self) -> DataRate {
         DataRate::new(
-            match self.rf_config.bb.sf {
-                radio::SpreadingFactor::_5 => SpreadingFactor::SF5,
-                radio::SpreadingFactor::_6 => SpreadingFactor::SF6,
-                radio::SpreadingFactor::_7 => SpreadingFactor::SF7,
-                radio::SpreadingFactor::_8 => SpreadingFactor::SF8,
-                radio::SpreadingFactor::_9 => SpreadingFactor::SF9,
-                radio::SpreadingFactor::_10 => SpreadingFactor::SF10,
-                radio::SpreadingFactor::_11 => SpreadingFactor::SF11,
-                radio::SpreadingFactor::_12 => SpreadingFactor::SF12,
-            },
-            match self.rf_config.bb.bw {
-                radio::Bandwidth::_125KHz => Bandwidth::BW125,
-                radio::Bandwidth::_250KHz => Bandwidth::BW250,
-                radio::Bandwidth::_500KHz => Bandwidth::BW500,
-                _ => panic!("unexpected lorawan bandwidth"),
-            },
+            self.rf_config.bb.sf.into(),
+            self.rf_config.bb.bw.into(),
         )
     }
 

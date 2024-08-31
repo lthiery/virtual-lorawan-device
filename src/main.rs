@@ -183,7 +183,7 @@ async fn packet_muxer<S: DownlinkSender>(
             loop {
                 let msg = client_rx.recv().await.ok_or(Error::RxChannelSemtechUdpClientRuntimeClosed)?;
                 if let client_runtime::Event::DownlinkRequest(downlink) = msg {
-
+                    println!("Downlink request: {:?}", downlink);
                     if let Some(scheduled_time) = downlink.pull_resp.data.txpk.time.tmst() {
                         let time = instant.elapsed().as_micros() as u32;
                         if scheduled_time > time {
@@ -220,9 +220,20 @@ async fn packet_muxer<S: DownlinkSender>(
                             downlink.nack(semtech_udp::tx_ack::Error::TooLate).await?;
                         }
                     } else {
+                        #[cfg(not(feature = "async-radio"))]
                         warn!(
                             "Unexpected! UDP packet to transmit radio packet immediately"
                         );
+                        #[cfg(feature = "async-radio")]
+                        {
+                            let send_downlink = Box::new(downlink.clone());
+                            for sender in &senders {
+                                if let Err(e) = sender.send(send_downlink.clone(), 0).await {
+                                    error ! ("Error sending packet to virtual-lorawan-device instance: {e}");
+                                }
+                            }
+                            downlink.ack().await?;
+                        }
                     }
                 }
             }

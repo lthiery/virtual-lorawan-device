@@ -4,9 +4,10 @@ use lorawan_device::async_device::radio::{
     PhyRxTx, RxConfig, RxMode, RxQuality, RxStatus, Timer, TxConfig,
 };
 use lorawan_device::async_device::Timings;
-use log::info;
+use log::{info, warn};
 use semtech_udp::client_runtime::{ClientTx, DownlinkRequest};
 use std::time::{Duration, Instant};
+use lorawan_device::nb_device::radio;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -70,48 +71,68 @@ impl PhyRxTx for VirtualRadio {
         &mut self,
         rx_buf: &mut [u8],
     ) -> Result<(usize, RxQuality), Self::PhyError> {
-        if let Some(rx_config) = self.rx_config {
-            if let RxMode::Continuous = rx_config.mode {
-               self.receive(rx_buf).await
+        loop {
+            if let Some(rx_config) = self.rx_config {
+                if let RxMode::Continuous = rx_config.mode {
+                    if let Some((len, quality)) = self.receive(rx_buf).await? {
+                        return Ok((len, quality));
+                    }
+                } else {
+                    return Err(Error::ContinuousReceiveCalledWhenRxConfigIsNotContinuous)
+                }
             } else {
-                Err(Error::ContinuousReceiveCalledWhenRxConfigIsNotContinuous)
+                return Err(Error::NoRxConfig)
             }
-        } else {
-            Err(Error::NoRxConfig)
         }
 
     }
 
     async fn rx_single(&mut self, buf: &mut [u8]) -> Result<RxStatus, Self::PhyError> {
-        info!("Rx Single");
-        if let Some(rx_config) = self.rx_config {
-            if let RxMode::Single { ms } = rx_config.mode {
-                tokio::select!(
-                    biased;
+        loop {
+            if let Some(rx_config) = self.rx_config {
+                if let RxMode::Single { ms } = rx_config.mode {
+                    tokio::select!(
                     rx = self.receive(buf) => {
-                        rx.map(|(len, quality)| RxStatus::Rx(len, quality))
+                        if let Some((len, quality)) = rx? {
+                            return Ok(RxStatus::Rx(len, quality));
+                        }
                     }
                     _ = tokio::time::sleep(Duration::from_millis(ms.into())) => {
-                        Ok(RxStatus::RxTimeout)
+                        return Ok(RxStatus::RxTimeout);
                     },
-
                 )
+                } else {
+                    return Err(Error::SingleCalledWhenRxConfigIsNotSingle)
+                }
             } else {
-                Err(Error::SingleCalledWhenRxConfigIsNotSingle)
+                return Err(Error::NoRxConfig);
             }
-        } else {
-            Err(Error::NoRxConfig)
         }
+
     }
 }
 
 impl VirtualRadio  {
 
-    async fn receive(&mut self, buf: &mut [u8]) -> Result<(usize, RxQuality), Error>{
-        let rx = self.receiver.recv().await.ok_or(Error::ReceivingDownlinkfromUdpRadio)?;
-        let len = rx.pull_resp.data.txpk.data.len();
-        buf[..len].copy_from_slice(&rx.pull_resp.data.txpk.data.data());
-        Ok((len, RxQuality::new(-86, 1)))
+    async fn receive(&mut self, buf: &mut [u8]) -> Result<Option<(usize, RxQuality)>, Error>{
+        match self.rx_config {
+            Some(rx_config) => {
+                let rx = self.receiver.recv().await.ok_or(Error::ReceivingDownlinkfromUdpRadio)?;
+                let (sf, bw) = (
+                    radio::SpreadingFactor::from(rx.pull_resp.data.txpk.datr.spreading_factor()),
+                    rx.pull_resp.data.txpk.datr.bandwidth().into());
+                if rx_config.rf.bb.sf == sf && rx_config.rf.bb.bw == bw {
+                    let len = rx.pull_resp.data.txpk.data.len();
+                    buf[..len].copy_from_slice(&rx.pull_resp.data.txpk.data.data());
+                    Ok(Some((len, RxQuality::new(-86, 1))))
+                } else {
+                    warn!("Received packet with SF {:?} and BW {:?} but expected SF {:?} and BW {:?}",
+                          sf, bw, rx_config.rf.bb.sf, rx_config.rf.bb.bw);
+                    Ok(None)
+                }
+            }
+            None => Err(Error::NoRxConfig)
+        }
     }
 }
 
