@@ -1,13 +1,16 @@
-use std::mem::offset_of;
-use crate::{DownlinkSender, util::{tx_request_to_rxpk, Settings}};
+use crate::{
+    util::{tx_request_to_rxpk, Settings},
+    DownlinkSender,
+};
+use log::{info, warn};
 use lorawan_device::async_device::radio::{
     PhyRxTx, RxConfig, RxMode, RxQuality, RxStatus, Timer, TxConfig,
 };
 use lorawan_device::async_device::Timings;
-use log::{info, warn};
-use semtech_udp::client_runtime::{ClientTx, DownlinkRequest};
-use std::time::{Duration, Instant};
 use lorawan_device::nb_device::radio;
+use semtech_udp::client_runtime::{ClientTx, DownlinkRequest};
+use std::mem::offset_of;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -49,16 +52,19 @@ impl PhyRxTx for VirtualRadio {
     const ANTENNA_GAIN: i8 = 0;
     const MAX_RADIO_POWER: u8 = 26;
 
-    async fn tx(
-        &mut self,
-        config: TxConfig,
-        buf: &[u8],
-    ) -> Result<u32, Self::PhyError> {
+    async fn tx(&mut self, config: TxConfig, buf: &[u8]) -> Result<u32, Self::PhyError> {
         let tmst = self.time.elapsed().as_micros() as u32;
         let settings = Settings::from(config.rf);
-        info!("Transmit @ {tmst} on {} Hz {:?}", settings.get_freq(), settings.get_datr());
+        info!(
+            "Transmit @ {tmst} on {} Hz {:?}",
+            settings.get_freq(),
+            settings.get_datr()
+        );
         let packet = tx_request_to_rxpk(settings, &buf, tmst);
-        self.client_tx.send(packet).await.map_err(|_| Error::SendingUplinktoUdpRadio)?;
+        self.client_tx
+            .send(packet)
+            .await
+            .map_err(|_| Error::SendingUplinktoUdpRadio)?;
         Ok(0)
     }
 
@@ -78,13 +84,12 @@ impl PhyRxTx for VirtualRadio {
                         return Ok((len, quality));
                     }
                 } else {
-                    return Err(Error::ContinuousReceiveCalledWhenRxConfigIsNotContinuous)
+                    return Err(Error::ContinuousReceiveCalledWhenRxConfigIsNotContinuous);
                 }
             } else {
-                return Err(Error::NoRxConfig)
+                return Err(Error::NoRxConfig);
             }
         }
-
     }
 
     async fn rx_single(&mut self, buf: &mut [u8]) -> Result<RxStatus, Self::PhyError> {
@@ -92,46 +97,51 @@ impl PhyRxTx for VirtualRadio {
             if let Some(rx_config) = self.rx_config {
                 if let RxMode::Single { ms } = rx_config.mode {
                     tokio::select!(
-                    rx = self.receive(buf) => {
-                        if let Some((len, quality)) = rx? {
-                            return Ok(RxStatus::Rx(len, quality));
+                        rx = self.receive(buf) => {
+                            if let Some((len, quality)) = rx? {
+                                return Ok(RxStatus::Rx(len, quality));
+                            }
                         }
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(ms.into())) => {
-                        return Ok(RxStatus::RxTimeout);
-                    },
-                )
+                        _ = tokio::time::sleep(Duration::from_millis(ms.into())) => {
+                            return Ok(RxStatus::RxTimeout);
+                        },
+                    )
                 } else {
-                    return Err(Error::SingleCalledWhenRxConfigIsNotSingle)
+                    return Err(Error::SingleCalledWhenRxConfigIsNotSingle);
                 }
             } else {
                 return Err(Error::NoRxConfig);
             }
         }
-
     }
 }
 
-impl VirtualRadio  {
-
-    async fn receive(&mut self, buf: &mut [u8]) -> Result<Option<(usize, RxQuality)>, Error>{
+impl VirtualRadio {
+    async fn receive(&mut self, buf: &mut [u8]) -> Result<Option<(usize, RxQuality)>, Error> {
         match self.rx_config {
             Some(rx_config) => {
-                let rx = self.receiver.recv().await.ok_or(Error::ReceivingDownlinkfromUdpRadio)?;
+                let rx = self
+                    .receiver
+                    .recv()
+                    .await
+                    .ok_or(Error::ReceivingDownlinkfromUdpRadio)?;
                 let (sf, bw) = (
                     radio::SpreadingFactor::from(rx.pull_resp.data.txpk.datr.spreading_factor()),
-                    rx.pull_resp.data.txpk.datr.bandwidth().into());
+                    rx.pull_resp.data.txpk.datr.bandwidth().into(),
+                );
                 if rx_config.rf.bb.sf == sf && rx_config.rf.bb.bw == bw {
                     let len = rx.pull_resp.data.txpk.data.len();
                     buf[..len].copy_from_slice(&rx.pull_resp.data.txpk.data.data());
                     Ok(Some((len, RxQuality::new(-86, 1))))
                 } else {
-                    warn!("Received packet with SF {:?} and BW {:?} but expected SF {:?} and BW {:?}",
-                          sf, bw, rx_config.rf.bb.sf, rx_config.rf.bb.bw);
+                    warn!(
+                        "Received packet with SF {:?} and BW {:?} but expected SF {:?} and BW {:?}",
+                        sf, bw, rx_config.rf.bb.sf, rx_config.rf.bb.bw
+                    );
                     Ok(None)
                 }
             }
-            None => Err(Error::NoRxConfig)
+            None => Err(Error::NoRxConfig),
         }
     }
 }

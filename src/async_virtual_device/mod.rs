@@ -6,9 +6,8 @@ use crate::{metrics, settings, Credentials, DownlinkSender, Result};
 
 use log::{debug, error, info, warn};
 use lorawan_device::async_device::{
-    radio::{PhyRxTx, Timer, RxConfig},
-    Device, JoinResponse, NetworkCredentials, SendResponse, Timings,
-    Downlink,
+    radio::{PhyRxTx, RxConfig, Timer},
+    Device, Downlink, JoinResponse, NetworkCredentials, SendResponse, Timings,
 };
 use lorawan_device::default_crypto::DefaultFactory;
 use lorawan_device::region::Configuration;
@@ -87,7 +86,6 @@ impl VirtualDevice {
         let random = rand::random::<u64>() % 1000;
         sleep(Duration::from_millis(random)).await;
 
-
         loop {
             let result = match self.state {
                 State::NotJoined => self.do_join().await,
@@ -142,7 +140,6 @@ impl VirtualDevice {
                 Ok(Duration::from_secs(self.secs_between_join_transmits))
             }
         }
-
     }
 
     async fn do_send(&mut self) -> Result<Duration> {
@@ -176,6 +173,9 @@ impl VirtualDevice {
     fn handle_downlink(&mut self, downlink: Downlink, is_class_c: bool) {
         let data_len = downlink.data.len();
         let fport = downlink.fport;
-        info!("{} downlink received: len = {data_len}, fport = {fport}, class_c = {is_class_c}", self.label);
+        info!(
+            "{} downlink received: len = {data_len}, fport = {fport}, class_c = {is_class_c}",
+            self.label
+        );
     }
 }

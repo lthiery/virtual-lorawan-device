@@ -1,4 +1,4 @@
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use metrics::Metrics;
 use semtech_udp::client_runtime;
 use semtech_udp::client_runtime::{ClientRx, ClientTx, DownlinkRequest, UdpRuntime};
@@ -23,9 +23,9 @@ mod async_virtual_device;
 #[cfg(feature = "async-radio")]
 use async_virtual_device::VirtualDevice;
 
+mod util;
 #[cfg(not(feature = "async-radio"))]
 mod virtual_device;
-mod util;
 
 #[cfg(not(feature = "async-radio"))]
 use virtual_device::VirtualDevice;

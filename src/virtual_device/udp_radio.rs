@@ -1,10 +1,10 @@
+use crate::util::{tx_request_to_rxpk, Settings};
 use log::info;
 use lorawan_device::{nb_device::radio, Timings};
 use semtech_udp::client_runtime::{ClientTx, DownlinkRequest};
 use std::time::{Duration, Instant};
 pub use tokio::sync::mpsc;
 use tokio::time::sleep;
-use crate::util::{tx_request_to_rxpk, Settings};
 #[derive(Debug)]
 // I need some intermediate event because of Lifetimes
 // maybe there's a cleaner way of doing this
@@ -106,7 +106,11 @@ impl radio::PhyRxTx for UdpRadio {
             radio::Event::TxRequest(tx_config, buffer) => {
                 let tmst = self.time.elapsed().as_micros() as u32;
                 let settings = Settings::from(tx_config.rf);
-                info!("Transmit @ {tmst} on {} Hz {:?}", settings.get_freq(), settings.get_datr());
+                info!(
+                    "Transmit @ {tmst} on {} Hz {:?}",
+                    settings.get_freq(),
+                    settings.get_datr()
+                );
                 let packet = tx_request_to_rxpk(settings, &buffer, tmst);
                 let sender = self.client_tx.clone();
                 tokio::spawn(async move {
@@ -149,4 +153,3 @@ impl Timings for UdpRadio {
 
 #[derive(Debug)]
 pub enum Error {}
-

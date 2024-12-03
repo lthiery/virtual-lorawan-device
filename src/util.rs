@@ -1,9 +1,13 @@
 use lorawan_device::nb_device::radio;
-use semtech_udp::{CodingRate, DataRate, push_data};
 use semtech_udp::push_data::RxPkV1;
+use semtech_udp::{push_data, CodingRate, DataRate};
 
-pub(crate) fn tx_request_to_rxpk(settings: Settings, buffer: &[u8], tmst: u32) -> push_data::Packet {
-    use push_data::{CRC, RxPk, Packet};
+pub(crate) fn tx_request_to_rxpk(
+    settings: Settings,
+    buffer: &[u8],
+    tmst: u32,
+) -> push_data::Packet {
+    use push_data::{Packet, RxPk, CRC};
     let rxpk = RxPkV1 {
         chan: 0,
         data: Vec::from(buffer),
@@ -20,12 +24,12 @@ pub(crate) fn tx_request_to_rxpk(settings: Settings, buffer: &[u8], tmst: u32) -
         tmst,
         time: None,
     };
-    let mut packet= Packet::from_rxpk([0, 0, 0, 0, 0, 0, 0, 0].into(), RxPk::V1(rxpk));
+    let mut packet = Packet::from_rxpk([0, 0, 0, 0, 0, 0, 0, 0].into(), RxPk::V1(rxpk));
 
     packet.data.stat = Some(push_data::Stat {
         time: chrono::Utc::now().to_string(),
-        lati: None,//37.8507396,
-        long: None,//-122.2817759,
+        lati: None, //37.8507396,
+        long: None, //-122.2817759,
         alti: None,
         rxnb: 0,
         rxok: 1,
@@ -65,13 +69,9 @@ impl From<radio::RfConfig> for Settings {
     }
 }
 
-
 impl Settings {
     pub fn get_datr(&self) -> DataRate {
-        DataRate::new(
-            self.rf_config.bb.sf.into(),
-            self.rf_config.bb.bw.into(),
-        )
+        DataRate::new(self.rf_config.bb.sf.into(), self.rf_config.bb.bw.into())
     }
 
     pub fn get_codr(&self) -> CodingRate {
