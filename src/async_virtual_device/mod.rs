@@ -167,6 +167,7 @@ impl VirtualDevice {
             }
             SendResponse::RxComplete => {}
         }
+        println!("{}", self.secs_between_transmits);
         Ok(Duration::from_secs(self.secs_between_transmits))
     }
 
@@ -177,5 +178,6 @@ impl VirtualDevice {
             "{} downlink received: len = {data_len}, fport = {fport}, class_c = {is_class_c}",
             self.label
         );
+        info!("downlink data: {:?}", downlink.data);
     }
 }
