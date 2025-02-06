@@ -7,11 +7,12 @@ use crate::{metrics, settings, Credentials, DownlinkSender, Result};
 use log::{debug, error, info, warn};
 use lorawan_device::async_device::{
     radio::{PhyRxTx, RxConfig, Timer},
-    Device, Downlink, JoinResponse, NetworkCredentials, SendResponse, Timings,
+    Device, DeviceHandler, Downlink, JoinResponse, NetworkCredentials, SendResponse, Timings,
 };
 use lorawan_device::default_crypto::DefaultFactory;
 use lorawan_device::region::Configuration;
 use lorawan_device::{AppEui, AppKey, DevEui, JoinMode};
+
 pub use semtech_udp::client_runtime::{ClientTx, DownlinkRequest};
 use std::str::FromStr;
 use std::time::Instant;
@@ -20,6 +21,43 @@ use tokio::{
     time::{sleep, Duration},
 };
 
+struct DeviceImpl {
+    pub state: State,
+    pub override_tx_period: Option<u16>,
+}
+
+impl Default for DeviceImpl {
+    fn default() -> Self {
+        Self {
+            state: State::NotJoined,
+            override_tx_period: None,
+        }
+    }
+}
+
+impl lorawan_device::async_device::DeviceHandler for DeviceImpl {}
+
+impl lorawan_device::async_device::CertificationHandler for DeviceImpl {
+    fn reset_device(&mut self) {
+        // TODO: tear everything down and start again...
+        // ...and we also need to reset timer to send join packet immediately
+        self.state = State::NotJoined;
+        info!("'Restarting' device...");
+    }
+
+    fn reset_mac(&mut self) {
+        // TODO: tear everything down and start again...
+        // ...and we also need to reset timer to send join packet immediately
+        self.state = State::NotJoined;
+        info!("Restarting mac layer...");
+    }
+
+    fn override_periodicity(&mut self, seconds: Option<u16>) {
+        self.override_tx_period = seconds;
+        info!("Updating tx_period to {:?}", seconds);
+    }
+}
+
 pub struct VirtualDevice {
     label: String,
     metrics_sender: metrics::Sender,
@@ -27,8 +65,8 @@ pub struct VirtualDevice {
     secs_between_transmits: u64,
     secs_between_join_transmits: u64,
     credentials: NetworkCredentials,
-    device: Device<VirtualRadio, DefaultFactory, VirtualTimer, rand_core::OsRng, 512, 4>,
-    state: State,
+    device:
+        Device<DeviceImpl, VirtualRadio, DefaultFactory, VirtualTimer, rand_core::OsRng, 512, 4>,
 }
 
 enum State {
@@ -50,7 +88,9 @@ impl VirtualDevice {
         region: settings::Region,
     ) -> Result<(DS, Self)> {
         let (sender, receiver) = mpsc::channel(100);
+        let dev_impl = DeviceImpl::default();
         let mut device = Device::new(
+            dev_impl,
             Configuration::new(region.into()),
             VirtualRadio {
                 receiver,
@@ -76,7 +116,6 @@ impl VirtualDevice {
                     AppKey::from_str(&credentials.app_key)?,
                 ),
                 device,
-                state: State::NotJoined,
             },
         ))
     }
@@ -87,17 +126,22 @@ impl VirtualDevice {
         sleep(Duration::from_millis(random)).await;
 
         loop {
-            let result = match self.state {
+            let result = match self.device.device.state {
                 State::NotJoined => self.do_join().await,
                 State::Joined => self.do_send().await,
             };
-            let duration = match result {
+            let mut duration = match result {
                 Ok(d) => d,
                 Err(e) => {
                     error!("{} error: {:?}", self.label, e);
                     Duration::from_secs(0)
                 }
             };
+
+            // Override duration
+            if let Some(d) = self.device.device.override_tx_period {
+                duration = Duration::from_secs(d.into());
+            }
 
             tokio::select!(
                 _ = sleep(duration) => {},
@@ -131,7 +175,7 @@ impl VirtualDevice {
 
         match join_response {
             JoinResponse::JoinSuccess => {
-                self.state = State::Joined;
+                self.device.device.state = State::Joined;
                 info!("{} joined successfully", self.label);
                 Ok(Duration::from_secs(0))
             }

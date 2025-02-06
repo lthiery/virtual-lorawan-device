@@ -35,3 +35,4 @@ features = ["macros", "sync", "time", "rt-multi-thread", "signal"]
 
 [features]
 async-radio = ["rand_core"]
+certification = ["async-radio", "lorawan-device/certification"]
