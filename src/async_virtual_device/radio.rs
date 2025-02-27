@@ -56,11 +56,12 @@ impl PhyRxTx for VirtualRadio {
         let tmst = self.time.elapsed().as_micros() as u32;
         let settings = Settings::from(config.rf);
         info!(
-            "Transmit @ {tmst} on {} Hz {:?}",
+            "Transmit @ {tmst} on {} Hz {:?}, power: {:?}",
             settings.get_freq(),
-            settings.get_datr()
+            settings.get_datr(),
+            config.pw,
         );
-        let packet = tx_request_to_rxpk(settings, &buf, tmst);
+        let packet = tx_request_to_rxpk(settings, &buf, tmst, config.pw);
         self.client_tx
             .send(packet)
             .await
@@ -132,6 +133,7 @@ impl VirtualRadio {
                 if rx_config.rf.bb.sf == sf && rx_config.rf.bb.bw == bw {
                     let len = rx.pull_resp.data.txpk.data.len();
                     buf[..len].copy_from_slice(&rx.pull_resp.data.txpk.data.data());
+                    // TODO: How to handle this?
                     Ok(Some((len, RxQuality::new(-86, 1))))
                 } else {
                     warn!(
